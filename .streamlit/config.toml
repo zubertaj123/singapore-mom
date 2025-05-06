@@ -1,0 +1,10 @@
+[theme]
+base="light"
+primaryColor="#007a5e"
+font="sans serif"
+
+[server]
+headless = true
+
+[client]
+toolbarMode = "minimal"

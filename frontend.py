@@ -186,11 +186,6 @@ with st.sidebar:
         st.session_state.user_role = user_role
         st.info(f"Role set to: **{user_role}**. New queries will be processed with this role.")
 
-# === EARLY EXIT IF API KEY NOT SET ===
-if not st.session_state.openai_api_key:
-    st.warning("Please enter your OpenAI API key in the sidebar to start using the assistant.")
-    st.stop()
-
 # === INTENT CLASSIFIER ===
 def classify_form_intent(query):
     q = query.lower()
@@ -325,3 +320,8 @@ st.markdown("""
     </span>
 </div>
 """, unsafe_allow_html=True)
+
+# === EARLY EXIT IF API KEY NOT SET ===
+if not st.session_state.openai_api_key:
+    st.warning("Please enter your OpenAI API key in the sidebar to start using the assistant.")
+    st.stop()

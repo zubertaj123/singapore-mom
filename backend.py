@@ -115,7 +115,11 @@ def rag_retrieval(state):
     return {"context": "", "trace": trace}
 
 def rag_generation(state):
+    import requests
+    from bs4 import BeautifulSoup
+
     llm = ChatOpenAI(model="gpt-4", temperature=0.2)
+
     chain = (
         RunnablePassthrough.assign(
             context=lambda x: x["context"],
@@ -126,10 +130,69 @@ def rag_generation(state):
         | llm
         | StrOutputParser()
     )
+
     result = chain.invoke(state)
     trace = state.get("trace", [])
-    trace.append(("🧠 RAG Generator", "Generated answer using retrieved documents."))
-    return {"rag_output": result, "source": "rag", "reference": "FAISS Vectorstore", "trace": trace}
+
+    # Check if RAG result is empty or fallback message
+    if "**I'm sorry, I couldn't find" in result:
+        trace.append(("📚 RAG Agent", "FAISS result insufficient, triggering MOM website lookup..."))
+
+        # === Perform live web search over MOM.gov.sg ===
+        search_query = state["input"]
+        search_url = f"https://www.google.com/search?q=site%3Amom.gov.sg+{search_query.replace(' ', '+')}"
+
+        try:
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(search_url, headers=headers)
+            soup = BeautifulSoup(response.text, "html.parser")
+            links = soup.select("a[href^='https://www.mom.gov.sg']")
+
+            if links:
+                first_link = links[0]["href"]
+                page = requests.get(first_link, headers=headers)
+                page_soup = BeautifulSoup(page.text, "html.parser")
+                paragraphs = page_soup.find_all("p")
+                page_text = "\n".join(p.get_text(strip=True) for p in paragraphs[:10])  # limit to 10 paras
+
+                # Re-run LLM on fetched content
+                new_prompt = qa_prompt.format(context=page_text, question=state["input"], role=state["role"])
+                result = llm.invoke(new_prompt).content
+
+                trace.append(("🌐 MOM Website", f"Reviewed page: [{first_link}]({first_link})"))
+                return {
+                    "rag_output": result,
+                    "source": "web_rag",
+                    "reference": first_link,
+                    "trace": trace
+                }
+
+            else:
+                trace.append(("🌐 MOM Website", "No relevant pages found."))
+                return {
+                    "rag_output": "**I'm sorry, I couldn't find specific information on the MoM official website.**",
+                    "source": "web_rag",
+                    "reference": "No link",
+                    "trace": trace
+                }
+
+        except Exception as e:
+            trace.append(("🌐 MOM Website", f"Error occurred during web search: {str(e)}"))
+            return {
+                "rag_output": "**I'm sorry, I couldn't find specific information on the MoM official website.**",
+                "source": "web_rag",
+                "reference": "Error",
+                "trace": trace
+            }
+
+    else:
+        trace.append(("📚 RAG Agent", "Used FAISS context to generate answer."))
+        return {
+            "rag_output": result,
+            "source": "rag",
+            "reference": "FAISS Vectorstore",
+            "trace": trace
+        }
 
 def call_llm_agent(state):
     tools = get_all_tools()

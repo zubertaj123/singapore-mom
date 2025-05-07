@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from datetime import datetime
 
-BACKEND_URL = "http://0.0.0.0:8000"  # Adjust if your FastAPI app runs elsewhere
+BACKEND_URL = "https://singapore-mom.onrender.com"  # Adjust if your FastAPI app runs elsewhere
 
 st.set_page_config(page_title="Agentic AI – MOM Assistant", layout="wide")
 

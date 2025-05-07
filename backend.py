@@ -14,7 +14,6 @@ from langchain_core.runnables import RunnablePassthrough
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import create_react_agent
 
-
 INDEX_PATH = "faiss_index"
 
 # === LOGGING ===

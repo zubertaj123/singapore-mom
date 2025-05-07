@@ -1,7 +1,7 @@
 # api.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from back import LangGraphAgentWrapper
+from backend import LangGraphAgentWrapper
 import logging
 import os
 

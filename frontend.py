@@ -12,9 +12,9 @@ st.session_state.setdefault("user_role", "Individual")
 st.session_state.setdefault("pending_response", False)
 st.session_state.setdefault("form_mode", False)
 st.session_state.setdefault("submitted", False)
+st.session_state.setdefault("openai_api_key", "")
 
-
-# === TOP BAR STYLING ===
+# === TOP BAR STYLING === 
 st.markdown("""
 <style>
 #MainMenu, footer, header {visibility: hidden;}
@@ -157,6 +157,40 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# === SIDEBAR ===
+with st.sidebar:
+    st.markdown("### 🔐 OpenAI API Key")
+    api_key_input = st.text_input("Enter your API key", type="password")
+    if api_key_input:
+        st.session_state.openai_api_key = api_key_input.strip()
+        st.success("API key saved.")
+    
+    st.markdown("---")
+    st.markdown("### 🧠 Agentic AI Reasoning Trace")
+    trace = st.session_state.get("agentic_trace", [])
+    if trace:
+        for label, value in trace:
+            st.markdown(f"""
+                <div style="margin-bottom:0.6rem; padding:0.7rem 1rem; background:#ffffff; border-left: 4px solid #007a5e; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                    <strong style="color:#007a5e;">{label}</strong><br>
+                    <span style="color:#333;">{value}</span>
+                </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("No trace yet. Ask a question to see reasoning.")
+
+    st.markdown("---")
+    st.markdown("### ⚙️ Configuration")
+    user_role = st.selectbox("You are a:", ["Individual", "Employer", "Employment Agency"], index=["Individual", "Employer", "Employment Agency"].index(st.session_state.user_role))
+    if user_role != st.session_state.user_role:
+        st.session_state.user_role = user_role
+        st.info(f"Role set to: **{user_role}**. New queries will be processed with this role.")
+
+# === EARLY EXIT IF API KEY NOT SET ===
+if not st.session_state.openai_api_key:
+    st.warning("Please enter your OpenAI API key in the sidebar to start using the assistant.")
+    st.stop()
+
 # === INTENT CLASSIFIER ===
 def classify_form_intent(query):
     q = query.lower()
@@ -259,7 +293,12 @@ if st.session_state.get("pending_response", False):
         """, unsafe_allow_html=True)
 
     try:
-        payload = {"query": latest_query, "role": current_role}
+        payload = {
+            "query": latest_query,
+            "role": current_role,
+            "openai_api_key": st.session_state.get("openai_api_key", "")
+        }
+
         response = requests.post(f"{BACKEND_URL}/query/", json=payload)
         response.raise_for_status()
         response_data = response.json()
@@ -276,28 +315,6 @@ if st.session_state.get("pending_response", False):
         st.session_state.pending_response = False
 
     st.rerun()
-
-# === SIDEBAR ===
-with st.sidebar:
-    st.markdown("### 🧠 Agentic AI Reasoning Trace")
-    trace = st.session_state.get("agentic_trace", [])
-    if trace:
-        for label, value in trace:
-            st.markdown(f"""
-                <div style="margin-bottom:0.6rem; padding:0.7rem 1rem; background:#ffffff; border-left: 4px solid #007a5e; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
-                    <strong style="color:#007a5e;">{label}</strong><br>
-                    <span style="color:#333;">{value}</span>
-                </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("No trace yet. Ask a question to see reasoning.")
-
-    st.markdown("---")
-    st.markdown("### ⚙️ Configuration")
-    user_role = st.selectbox("You are a:", ["Individual", "Employer", "Employment Agency"], index=["Individual", "Employer", "Employment Agency"].index(st.session_state.user_role))
-    if user_role != st.session_state.user_role:
-        st.session_state.user_role = user_role
-        st.info(f"Role set to: **{user_role}**. New queries will be processed with this role.")
 
 # === FOOTER ===
 st.markdown("""

@@ -16,6 +16,7 @@ agent_wrapper = LangGraphAgentWrapper(logger=logger)
 class QueryRequest(BaseModel):
     query: str
     role: str
+    openai_api_key: str = ""
 
 class Response(BaseModel):
     result: str
@@ -27,7 +28,12 @@ class Response(BaseModel):
 async def process_query(request: QueryRequest):
     logger.info(f"Processing query: {request.query} with role: {request.role}")
     try:
-        result = agent_wrapper.run(request.query, request.role, logger=logger) # Pass the logger
+        result = agent_wrapper.run(
+                query=request.query,
+                role=request.role,
+                logger=logger,
+                openai_api_key=request.openai_api_key.strip()
+            )
         if "Error processing request: Prompt missing required variables" in result.get("result", ""):
             logger.error(f"Langchain agent prompt error: {result['result']}")
             raise HTTPException(status_code=500, detail=result["result"])

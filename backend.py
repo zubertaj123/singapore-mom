@@ -265,8 +265,12 @@ class LangGraphAgentWrapper:
     def __init__(self, logger):
         self.graph = get_langgraph_agent(logger)
 
-    def run(self, query, role, logger):
+    def run(self, query, role, logger, openai_api_key=None):
         tool_logs.clear()
+
+        if openai_api_key:
+            os.environ["OPENAI_API_KEY"] = openai_api_key
+
         logger.info(f"LangGraphAgentWrapper.run called with query: '{query}', role: '{role}'")
         result = self.graph.invoke({
             "input": query,

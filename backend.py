@@ -1,5 +1,3 @@
-
-
 import os
 from datetime import datetime
 from typing import List, Optional, TypedDict, NamedTuple
@@ -13,6 +11,9 @@ from langchain.agents import Tool
 from langchain_core.runnables import RunnablePassthrough
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import create_react_agent
+
+import os
+os.environ["OPENAI_API_KEY"] = ""
 
 INDEX_PATH = "faiss_index"
 
@@ -99,7 +100,6 @@ Use the provided CONTEXT to answer the user's QUESTION.
 """
 )
 
-
 # === LANGGRAPH NODES ===
 def rag_retrieval(state):
     logger = state.get("logger")
@@ -114,29 +114,11 @@ def rag_retrieval(state):
     trace.append(("📚 RAG Retrieval", "No documents matched."))
     return {"context": "", "trace": trace}
 
-# def rag_generation(state):
-#     llm = ChatOpenAI(model="gpt-4", temperature=0.2)
-#     chain = (
-#         RunnablePassthrough.assign(
-#             context=lambda x: x["context"],
-#             question=lambda x: x["input"],
-#             role=lambda x: x["role"]
-#         )
-#         | qa_prompt
-#         | llm
-#         | StrOutputParser()
-#     )
-#     result = chain.invoke(state)
-#     trace = state.get("trace", [])
-#     trace.append(("🧠 RAG Generator", "Generated answer using retrieved documents."))
-#     return {"rag_output": result, "source": "rag", "reference": "FAISS Vectorstore", "trace": trace}
-
 def rag_generation(state):
     import requests
     from bs4 import BeautifulSoup
 
     llm = ChatOpenAI(model="gpt-4", temperature=0.2)
-
     chain = (
         RunnablePassthrough.assign(
             context=lambda x: x["context"],
@@ -151,11 +133,9 @@ def rag_generation(state):
     result = chain.invoke(state)
     trace = state.get("trace", [])
 
-    # Check if RAG result is empty or fallback message
     if "**I'm sorry, I couldn't find" in result:
-        trace.append(("📚 RAG Agent", "FAISS result insufficient, triggering MOM website lookup..."))
+        trace.append(("📚 RAG Agent", "FAISS result insufficient, using MOM website content as RAG fallback"))
 
-        # === Perform live web search over MOM.gov.sg ===
         search_query = state["input"]
         search_url = f"https://www.google.com/search?q=site%3Amom.gov.sg+{search_query.replace(' ', '+')}"
 
@@ -170,38 +150,35 @@ def rag_generation(state):
                 page = requests.get(first_link, headers=headers)
                 page_soup = BeautifulSoup(page.text, "html.parser")
                 paragraphs = page_soup.find_all("p")
-                page_text = "\n".join(p.get_text(strip=True) for p in paragraphs[:10])  # limit to 10 paras
+                page_text = "\n".join(p.get_text(strip=True) for p in paragraphs[:10])
 
-                # Re-run LLM on fetched content
                 new_prompt = qa_prompt.format(context=page_text, question=state["input"], role=state["role"])
                 result = llm.invoke(new_prompt).content
 
-                trace.append(("🌐 MOM Website", f"Reviewed page: [{first_link}]({first_link})"))
+                trace.append(("🌐 MOM Website", f"Reviewed page: {first_link}"))
+                trace.append(("📚 RAG Agent", "Used MOM website content as fallback RAG source"))
                 return {
                     "rag_output": result,
-                    "source": "web_rag",
+                    "source": "rag",
                     "reference": first_link,
                     "trace": trace
                 }
-
             else:
                 trace.append(("🌐 MOM Website", "No relevant pages found."))
                 return {
                     "rag_output": "**I'm sorry, I couldn't find specific information on the MoM official website.**",
-                    "source": "web_rag",
-                    "reference": "No link",
+                    "source": "rag",
+                    "reference": "none",
                     "trace": trace
                 }
-
         except Exception as e:
-            trace.append(("🌐 MOM Website", f"Error occurred during web search: {str(e)}"))
+            trace.append(("🌐 MOM Website", f"Error during fallback search: {str(e)}"))
             return {
-                "rag_output": "**I'm sorry, I couldn't find specific information on the MoM official website.**",
-                "source": "web_rag",
-                "reference": "Error",
+                "rag_output": "**I'm sorry, I couldn't access the MoM website at this time.**",
+                "source": "rag",
+                "reference": "error",
                 "trace": trace
             }
-
     else:
         trace.append(("📚 RAG Agent", "Used FAISS context to generate answer."))
         return {
@@ -210,7 +187,6 @@ def rag_generation(state):
             "reference": "FAISS Vectorstore",
             "trace": trace
         }
-
 
 def call_llm_agent(state):
     tools = get_all_tools()
@@ -341,7 +317,6 @@ def get_langgraph_agent(logger):
     builder.add_edge("format_tool_output", "generate_final_answer")
     return builder.compile()
 
-
 # === WRAPPER ===
 class LangGraphAgentWrapper:
     def __init__(self, logger):
@@ -369,3 +344,20 @@ class LangGraphAgentWrapper:
         }
 
 __all__ = ["LangGraphAgentWrapper", "tool_logs"]
+
+# # === MAIN EXECUTION TEST ===
+# if __name__ == "__main__":
+#     from pprint import pprint
+
+#     # Sample prompt to simulate
+#     sample_query = "Can a domestic worker change employers in Singapore?"
+#     sample_role = "Individual"
+#     openai_api_key = os.getenv("OPENAI_API_KEY") or "sk-..."  # replace with your key or inject via env
+
+#     wrapper = LangGraphAgentWrapper(logger)
+#     result = wrapper.run(query=sample_query, role=sample_role, logger=logger, openai_api_key=openai_api_key)
+#     print("\n===== FINAL OUTPUT =====")
+#     pprint(result["result"])
+#     print("\n===== AGENTIC TRACE =====")
+#     for label, step in result["trace"]:
+#         print(f"{label}: {step}")

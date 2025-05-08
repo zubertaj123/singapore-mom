@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 from datetime import datetime
 
-BACKEND_URL = "https://singapore-mom.onrender.com"  # Adjust if your FastAPI app runs elsewhere
+BACKEND_URL = "http://0.0.0.0:8000"  # Adjust if your FastAPI app runs elsewhere
 
 st.set_page_config(page_title="Agentic AI – MOM Assistant", layout="wide")
 
@@ -157,35 +157,6 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# === SIDEBAR ===
-with st.sidebar:
-    st.markdown("### 🔐 OpenAI API Key")
-    api_key_input = st.text_input("Enter your API key", type="password")
-    if api_key_input:
-        st.session_state.openai_api_key = api_key_input.strip()
-        st.success("API key saved.")
-    
-    st.markdown("---")
-    st.markdown("### 🧠 Agentic AI Reasoning Trace")
-    trace = st.session_state.get("agentic_trace", [])
-    if trace:
-        for label, value in trace:
-            st.markdown(f"""
-                <div style="margin-bottom:0.6rem; padding:0.7rem 1rem; background:#ffffff; border-left: 4px solid #007a5e; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
-                    <strong style="color:#007a5e;">{label}</strong><br>
-                    <span style="color:#333;">{value}</span>
-                </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.info("No trace yet. Ask a question to see reasoning.")
-
-    st.markdown("---")
-    st.markdown("### ⚙️ Configuration")
-    user_role = st.selectbox("You are a:", ["Individual", "Employer", "Employment Agency"], index=["Individual", "Employer", "Employment Agency"].index(st.session_state.user_role))
-    if user_role != st.session_state.user_role:
-        st.session_state.user_role = user_role
-        st.info(f"Role set to: **{user_role}**. New queries will be processed with this role.")
-
 # === INTENT CLASSIFIER ===
 def classify_form_intent(query):
     q = query.lower()
@@ -311,6 +282,35 @@ if st.session_state.get("pending_response", False):
 
     st.rerun()
 
+# === SIDEBAR ===
+with st.sidebar:
+    # st.markdown("### 🔐 OpenAI API Key")
+    # api_key_input = st.text_input("Enter your API key", type="password")
+    # if api_key_input:
+    #     st.session_state.openai_api_key = api_key_input.strip()
+    #     st.success("API key saved.")
+    
+    # st.markdown("---")
+    st.markdown("### 🧠 Agentic AI Reasoning Trace")
+    trace = st.session_state.get("agentic_trace", [])
+    if trace:
+        for label, value in trace:
+            st.markdown(f"""
+                <div style="margin-bottom:0.6rem; padding:0.7rem 1rem; background:#ffffff; border-left: 4px solid #007a5e; border-radius: 6px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+                    <strong style="color:#007a5e;">{label}</strong><br>
+                    <span style="color:#333;">{value}</span>
+                </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("No trace yet. Ask a question to see reasoning.")
+
+    st.markdown("---")
+    st.markdown("### ⚙️ Configuration")
+    user_role = st.selectbox("You are a:", ["Individual", "Employer", "Employment Agency"], index=["Individual", "Employer", "Employment Agency"].index(st.session_state.user_role))
+    if user_role != st.session_state.user_role:
+        st.session_state.user_role = user_role
+        st.info(f"Role set to: **{user_role}**. New queries will be processed with this role.")
+
 # === FOOTER ===
 st.markdown("""
 <div class="footer">
@@ -320,8 +320,3 @@ st.markdown("""
     </span>
 </div>
 """, unsafe_allow_html=True)
-
-# === EARLY EXIT IF API KEY NOT SET ===
-if not st.session_state.openai_api_key:
-    st.warning("Please enter your OpenAI API key in the sidebar to start using the assistant.")
-    st.stop()

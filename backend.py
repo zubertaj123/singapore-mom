@@ -2,6 +2,9 @@ import os
 from datetime import datetime
 from typing import List, Optional, TypedDict, NamedTuple
 import logging
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, parse_qs, unquote, quote_plus
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -12,7 +15,6 @@ from langchain_core.runnables import RunnablePassthrough
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import create_react_agent
 
-import os
 os.environ["OPENAI_API_KEY"] = ""
 
 INDEX_PATH = "faiss_index"
@@ -25,52 +27,19 @@ formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
-# === UTILS ===
-tool_logs = []
-
-class ToolInvocation(NamedTuple):
-    name: str
-    args: dict
-
-def log_tool_usage(tool_name: str, user_input: str, logger):
-    log = {
-        "tool": tool_name,
-        "input": user_input,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    }
-    tool_logs.append(log)
-    logger.info(f"Tool '{tool_name}' used with input: '{user_input}'")
-    return ("🛠️ Tool Agent", f"{tool_name} used with input: '{user_input}'")
-
-def with_logging(name, func):
-    def wrapper(state):
-        logger = state.get("logger")
-        if logger:
-            log_tool_usage(name, state["input"], logger)
-        return func(state)
-    return wrapper
-
-# === TOOLS ===
-def get_all_tools():
-    return [
-        Tool(name="DependantPassTool", func=with_logging("Dependant Pass Tool", lambda state: "Requires salary ≥ SGD 6,000/month for Dependant Pass eligibility."), description="Check eligibility for Dependant Pass."),
-        Tool(name="QuotaTool", func=with_logging("Quota Tool", lambda state: "S Pass quota is capped at 10% for services sector."), description="Check S Pass quota limits."),
-        Tool(name="LicenseTool", func=with_logging("License Tool", lambda state: "EA must have valid MOM license: https://www.mom.gov.sg/eservices/services/employment-agency-licence"), description="Verify MOM license."),
-        Tool(name="AppointmentTool", func=with_logging("Appointment Tool", lambda state: "Appointment scheduled (simulated). Confirmation sent."), description="Simulate MOM appointment."),
-        Tool(name="WPOLSubmissionTool", func=with_logging("WPOL Submission Tool", lambda state: "Work Permit Application submitted (simulated)."), description="Simulate Work Permit submission."),
-        Tool(name="StatusCheckerTool", func=with_logging("Status Checker Tool", lambda state: "Application is in queue. Response in 3–5 business days."), description="Check application status.")
-    ]
-
-# === VECTORSTORE ===
-def load_vectorstore(logger):
-    embeddings = OpenAIEmbeddings()
-    try:
-        vectorstore = FAISS.load_local(INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
-        logger.info("Vectorstore loaded.")
-        return vectorstore
-    except Exception as e:
-        logger.error(f"Vectorstore error: {e}")
-        return None
+# === STATE ===
+class AgentState(TypedDict):
+    input: str
+    role: str
+    context: Optional[str]
+    agent_output: Optional[str]
+    rag_output: Optional[str]
+    source: Optional[str]
+    reference: Optional[str]
+    tool_output: Optional[str]
+    result: Optional[str]
+    logger: Optional[logging.Logger]
+    trace: Optional[List[tuple]]
 
 # === PROMPT ===
 qa_prompt = PromptTemplate(
@@ -100,7 +69,18 @@ Use the provided CONTEXT to answer the user's QUESTION.
 """
 )
 
-# === LANGGRAPH NODES ===
+# === VECTORSTORE ===
+def load_vectorstore(logger):
+    embeddings = OpenAIEmbeddings()
+    try:
+        vectorstore = FAISS.load_local(INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
+        logger.info("Vectorstore loaded.")
+        return vectorstore
+    except Exception as e:
+        logger.error(f"Vectorstore error: {e}")
+        return None
+
+# === RAG RETRIEVAL NODE ===
 def rag_retrieval(state):
     logger = state.get("logger")
     trace = state.get("trace", [])
@@ -114,73 +94,28 @@ def rag_retrieval(state):
     trace.append(("📚 RAG Retrieval", "No documents matched."))
     return {"context": "", "trace": trace}
 
+# === RAG GENERATION NODE ===
 def rag_generation(state):
-    import requests
-    from bs4 import BeautifulSoup
-
+    trace = state.get("trace", [])
+    logger = state.get("logger")
+    query = state["input"]
+    context = state.get("context", "")
     llm = ChatOpenAI(model="gpt-4", temperature=0.2)
+
+    # Step 1: FAISS RAG
+    # trace.append(("📚 RAG Agent", "Trying FAISS-based RAG generation..."))
     chain = (
         RunnablePassthrough.assign(
             context=lambda x: x["context"],
             question=lambda x: x["input"],
             role=lambda x: x["role"]
-        )
-        | qa_prompt
-        | llm
-        | StrOutputParser()
+        ) | qa_prompt | llm | StrOutputParser()
     )
-
     result = chain.invoke(state)
-    trace = state.get("trace", [])
+    logger.info(f"FAISS RAG result: {result}")
 
-    if "**I'm sorry, I couldn't find" in result:
-        trace.append(("📚 RAG Agent", "FAISS result insufficient, using MOM website content as RAG fallback"))
-
-        search_query = state["input"]
-        search_url = f"https://www.google.com/search?q=site%3Amom.gov.sg+{search_query.replace(' ', '+')}"
-
-        try:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(search_url, headers=headers)
-            soup = BeautifulSoup(response.text, "html.parser")
-            links = soup.select("a[href^='https://www.mom.gov.sg']")
-
-            if links:
-                first_link = links[0]["href"]
-                page = requests.get(first_link, headers=headers)
-                page_soup = BeautifulSoup(page.text, "html.parser")
-                paragraphs = page_soup.find_all("p")
-                page_text = "\n".join(p.get_text(strip=True) for p in paragraphs[:10])
-
-                new_prompt = qa_prompt.format(context=page_text, question=state["input"], role=state["role"])
-                result = llm.invoke(new_prompt).content
-
-                trace.append(("🌐 MOM Website", f"Reviewed page: {first_link}"))
-                trace.append(("📚 RAG Agent", "Used MOM website content as fallback RAG source"))
-                return {
-                    "rag_output": result,
-                    "source": "rag",
-                    "reference": first_link,
-                    "trace": trace
-                }
-            else:
-                trace.append(("🌐 MOM Website", "No relevant pages found."))
-                return {
-                    "rag_output": "**I'm sorry, I couldn't find specific information on the MoM official website.**",
-                    "source": "rag",
-                    "reference": "none",
-                    "trace": trace
-                }
-        except Exception as e:
-            trace.append(("🌐 MOM Website", f"Error during fallback search: {str(e)}"))
-            return {
-                "rag_output": "**I'm sorry, I couldn't access the MoM website at this time.**",
-                "source": "rag",
-                "reference": "error",
-                "trace": trace
-            }
-    else:
-        trace.append(("📚 RAG Agent", "Used FAISS context to generate answer."))
+    if "I'm sorry, I couldn't find specific" not in result:
+        # trace.append(("📚 RAG Agent", "Used FAISS context to generate answer."))
         return {
             "rag_output": result,
             "source": "rag",
@@ -188,48 +123,81 @@ def rag_generation(state):
             "trace": trace
         }
 
-def call_llm_agent(state):
-    tools = get_all_tools()
-    llm = ChatOpenAI(model="gpt-4", temperature=0.2)
-    agent_executor = create_react_agent(llm, tools)
-    result = agent_executor.invoke({
-        "messages": [{"role": "user", "content": state["input"]}]
-    })
-    trace = state.get("trace", [])
-    trace.append(("🧠 LLM Agent", "Fallback to ReAct agent-based reasoning."))
+    # Step 2: MOM Website via DuckDuckGo
+    try:
+        headers = {"User-Agent": "Mozilla/5.0"}
+        search_url = f"https://html.duckduckgo.com/html/?q=site:mom.gov.sg+{quote_plus(query)}"
+        html = requests.get(search_url, headers=headers, timeout=10).text
+        soup = BeautifulSoup(html, "html.parser")
+        links = soup.select(".result__title a")
+
+        mom_links = []
+        for a in links:
+            href = a.get("href", "")
+            if "uddg=" in href:
+                parsed = parse_qs(urlparse(href).query)
+                real_url = parsed.get("uddg", [""])[0]
+                if real_url.startswith("https://www.mom.gov.sg"):
+                    mom_links.append((a.get_text(strip=True), real_url))
+
+        logger.info(f"MOM links found: {mom_links}")
+
+        if mom_links:
+            top_title, top_url = mom_links[0]
+            page = requests.get(top_url, headers=headers, timeout=10)
+            page_soup = BeautifulSoup(page.text, "html.parser")
+            paragraphs = page_soup.find_all(["p", "li"])
+            raw_text = "\n".join(p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50)
+            context = raw_text[:3000]
+
+            # Rerun summarization with LLM
+            chain = (
+                RunnablePassthrough.assign(
+                    context=lambda x: context,
+                    question=lambda x: state["input"],
+                    role=lambda x: state["role"]
+                ) | qa_prompt | llm | StrOutputParser()
+            )
+            result = chain.invoke(state)
+            trace.append(("🌐 MOM Website", f"Used content from: {top_url}"))
+
+            # Optional: Final fallback if response is still not useful
+            if "I'm sorry" in result:
+                result = llm.invoke(f"Please help answer this Singapore manpower-related query: {query}").content
+
+                return {
+                    "rag_output": result,
+                    "source": "llm",
+                    "reference": "LLM fallback after web",
+                    "trace": trace
+                }
+
+            return {
+                "rag_output": result + f"\n\n🔗 **Reference:** [{top_title}]({top_url})",
+                "source": "rag",
+                "reference": top_url,
+                "trace": trace
+            }
+
+        else:
+            trace.append(("🌐 MOM Website", "No relevant pages found."))
+
+    except Exception as e:
+        trace.append(("🌐 MOM Website", f"Error during MOM search: {str(e)}"))
+
+    # === Step 3: Direct LLM Fallback ===
+    result = llm.invoke(f"Please help answer this Singapore manpower-related query: {query}").content
     return {
-        "agent_output": result.get("output", result),
+        "rag_output": result,
         "source": "llm",
-        "reference": "LLM agent only",
+        "reference": "LLM fallback",
         "trace": trace
     }
 
-def call_tool(state):
-    tool_call = state["tool_calls"][0]
-    tool = next(t for t in get_all_tools() if t.name == tool_call.name)
-    return {"tool_output": tool.func(state)}
 
-def format_tool_output(state):
-    if "tool_output" in state and state["tool_calls"]:
-        tool_name = state["tool_calls"][0].name
-        return {"agent_output": state["tool_output"], "source": "tool", "reference": tool_name}
-    return {"agent_output": "No tool output.", "source": "error", "reference": "unknown"}
-
-def rag_or_llm_router(state, logger):
-    context = state.get("context", "")
-    if context and len(context.strip()) > 100:
-        return "rag_generation"
-    return "llm_agent"
-
-def should_continue(state):
-    if "tool_calls" in state:
-        return {"__next__": "call_tool"}
-    return {"__next__": "generate_final_answer"}
-
+# === FINAL RESPONSE ===
 def format_bot_response(content: str, title: str = "📌 MOM Assistant", highlight_color="#007a5e") -> str:
-    html_content = (
-        content.replace("**", "<strong>").replace("<strong>", "</strong>", 1)
-    )
+    html_content = content.replace("**", "<strong>").replace("<strong>", "</strong>", 1)
     return f"""
     <div style="
         background-color: #ffffff;
@@ -250,114 +218,60 @@ def format_bot_response(content: str, title: str = "📌 MOM Assistant", highlig
 def generate_final_answer(state):
     trace = state.get("trace", [])
     timestamp = datetime.now().strftime('%H:%M:%S')
+    response = state.get("rag_output")
+    source = state.get("source")
 
-    if "rag_output" in state:
-        trace.append(("📚 RAG Agent", "Used FAISS context to generate answer"))
+    if response:
+        label = "📚 RAG Agent"
+        trace.append((label, "Final answer generated."))
         trace.append(("✅ Final Response", f"Delivered at {timestamp}"))
-
-        formatted = format_bot_response(state["rag_output"])
+        formatted = format_bot_response(response)
         return {**state, "result": formatted, "trace": trace}
 
-    elif "agent_output" in state:
-        trace.append(("🧠 LLM Agent", "Fallback to tool or open-ended response"))
-        trace.append(("✅ Final Response", f"Delivered at {timestamp}"))
-
-        formatted = format_bot_response(str(state["agent_output"]))
-        return {**state, "result": formatted, "trace": trace}
-
-    trace.append(("❌ Error", "No valid output found in either path"))
+    trace.append(("❌ Error", "No valid output found in any step"))
     return {
         **state,
         "result": format_bot_response("⚠️ Sorry, I couldn't find an answer."),
         "trace": trace
     }
 
-# === STATE ===
-class AgentState(TypedDict):
-    input: str
-    role: str
-    context: Optional[str]
-    tool_calls: Optional[List[ToolInvocation]]
-    agent_output: Optional[str]
-    rag_output: Optional[str]
-    source: Optional[str]
-    reference: Optional[str]
-    tool_output: Optional[str]
-    result: Optional[str]
-    logger: Optional[logging.Logger]
-    trace: Optional[List[tuple]]
-
-# === GRAPH ===
+# === GRAPH CONSTRUCTION ===
 def get_langgraph_agent(logger):
     builder = StateGraph(AgentState)
     builder.add_node("rag_retrieval", rag_retrieval)
     builder.add_node("rag_generation", rag_generation)
-    builder.add_node("llm_agent", call_llm_agent)
-    builder.add_node("call_tool", call_tool)
-    builder.add_node("format_tool_output", format_tool_output)
     builder.add_node("generate_final_answer", generate_final_answer)
-
     builder.set_entry_point("rag_retrieval")
-
-    builder.add_conditional_edges(
-        "rag_retrieval",
-        lambda s: rag_or_llm_router(s, s.get("logger")),
-        {
-            "rag_generation": "rag_generation",
-            "llm_agent": "llm_agent"
-        }
-    )
-
+    builder.add_edge("rag_retrieval", "rag_generation")
     builder.add_edge("rag_generation", "generate_final_answer")
-    builder.add_conditional_edges("llm_agent", should_continue, {
-        "call_tool": "call_tool",
-        "generate_final_answer": "generate_final_answer"
-    })
-    builder.add_edge("call_tool", "format_tool_output")
-    builder.add_edge("format_tool_output", "generate_final_answer")
     return builder.compile()
 
-# === WRAPPER ===
 class LangGraphAgentWrapper:
     def __init__(self, logger):
         self.graph = get_langgraph_agent(logger)
 
-    def run(self, query, role, logger, openai_api_key=None):
-        tool_logs.clear()
-
-        if openai_api_key:
-            os.environ["OPENAI_API_KEY"] = openai_api_key
-
-        logger.info(f"LangGraphAgentWrapper.run called with query: '{query}', role: '{role}'")
-        result = self.graph.invoke({
+    def run(self, query, role, logger):
+        return self.graph.invoke({
             "input": query,
             "role": role,
             "logger": logger,
             "trace": [("🧑‍💬 User Message", query)]
         })
-        logger.info(f"LangGraphAgentWrapper.run result: {result}")
-        return {
-            "result": result.get("result", "⚠️ No response found."),
-            "source": result.get("source", "unknown"),
-            "reference": result.get("reference", "unknown"),
-            "trace": result.get("trace", [("LangGraph", "Execution complete")])
-        }
 
-__all__ = ["LangGraphAgentWrapper", "tool_logs"]
 
-# # === MAIN EXECUTION TEST ===
-# if __name__ == "__main__":
-#     from pprint import pprint
+# === MAIN EXECUTION TEST ===
+if __name__ == "__main__":
+    from pprint import pprint
 
-#     # Sample prompt to simulate
-#     sample_query = "Can a domestic worker change employers in Singapore?"
-#     sample_role = "Individual"
-#     openai_api_key = os.getenv("OPENAI_API_KEY") or "sk-..."  # replace with your key or inject via env
+    # Sample prompt to simulate
+    sample_query = "Can a domestic worker change employers in Singapore?"
+    sample_role = "Individual"
+    openai_api_key = os.getenv("OPENAI_API_KEY")
 
-#     wrapper = LangGraphAgentWrapper(logger)
-#     result = wrapper.run(query=sample_query, role=sample_role, logger=logger, openai_api_key=openai_api_key)
-#     print("\n===== FINAL OUTPUT =====")
-#     pprint(result["result"])
-#     print("\n===== AGENTIC TRACE =====")
-#     for label, step in result["trace"]:
-#         print(f"{label}: {step}")
+    wrapper = LangGraphAgentWrapper(logger)
+    result = wrapper.run(query=sample_query, role=sample_role, logger=logger)
+    print("\n===== FINAL OUTPUT =====")
+    pprint(result["result"])
+    print("\n===== AGENTIC TRACE =====")
+    for label, step in result["trace"]:
+        print(f"{label}: {step}")

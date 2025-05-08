@@ -114,43 +114,29 @@ def rag_retrieval(state):
     trace.append(("📚 RAG Retrieval", "No documents matched."))
     return {"context": "", "trace": trace}
 
-import urllib.parse
-
-def extract_mom_links_from_duckduckgo(query, max_results=3):
-    import requests
-    from bs4 import BeautifulSoup
-
-    search_url = f"https://html.duckduckgo.com/html/?q=site:mom.gov.sg+{urllib.parse.quote_plus(query)}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(search_url, headers=headers, timeout=10)
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    results = []
-    for link in soup.select(".result__title a")[:max_results]:
-        href = link.get("href", "")
-        if "uddg=" in href:
-            parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
-            real_url = parsed.get("uddg", [""])[0]
-            title = link.get_text(strip=True)
-            if real_url.startswith("https://www.mom.gov.sg"):
-                results.append((title, real_url))
-    return results
-
-
-from urllib.parse import urlparse, parse_qs, unquote
+# def rag_generation(state):
+#     llm = ChatOpenAI(model="gpt-4", temperature=0.2)
+#     chain = (
+#         RunnablePassthrough.assign(
+#             context=lambda x: x["context"],
+#             question=lambda x: x["input"],
+#             role=lambda x: x["role"]
+#         )
+#         | qa_prompt
+#         | llm
+#         | StrOutputParser()
+#     )
+#     result = chain.invoke(state)
+#     trace = state.get("trace", [])
+#     trace.append(("🧠 RAG Generator", "Generated answer using retrieved documents."))
+#     return {"rag_output": result, "source": "rag", "reference": "FAISS Vectorstore", "trace": trace}
 
 def rag_generation(state):
-    logger = state.get("logger")
     import requests
     from bs4 import BeautifulSoup
 
     llm = ChatOpenAI(model="gpt-4", temperature=0.2)
-    trace = state.get("trace", [])
-    query = state["input"]
-    context = state.get("context", "")
 
-    # === Step 1: Try FAISS-based RAG ===
-    trace.append(("📚 RAG Agent", "Trying FAISS-based RAG generation..."))
     chain = (
         RunnablePassthrough.assign(
             context=lambda x: x["context"],
@@ -161,61 +147,40 @@ def rag_generation(state):
         | llm
         | StrOutputParser()
     )
+
     result = chain.invoke(state)
-    logger.info(f"FAISS RAG result: {result}")
-    # === If FAISS RAG fails, go to Step 2 ===
-    if "I'm sorry, I couldn't find specific" in result:
-        trace.append(("📚 RAG Agent", "Trying FAISS-based RAG generation."))
-        query = state["input"]
-        search_url = f"https://html.duckduckgo.com/html/?q=site:mom.gov.sg+{query.replace(' ', '+')}"
-        headers = {"User-Agent": "Mozilla/5.0"}
+    trace = state.get("trace", [])
+
+    # Check if RAG result is empty or fallback message
+    if "**I'm sorry, I couldn't find" in result:
+        trace.append(("📚 RAG Agent", "FAISS result insufficient, triggering MOM website lookup..."))
+
+        # === Perform live web search over MOM.gov.sg ===
+        search_query = state["input"]
+        search_url = f"https://www.google.com/search?q=site%3Amom.gov.sg+{search_query.replace(' ', '+')}"
 
         try:
-            html = requests.get(search_url, headers=headers, timeout=10).text
-            soup = BeautifulSoup(html, "html.parser")
+            headers = {"User-Agent": "Mozilla/5.0"}
+            response = requests.get(search_url, headers=headers)
+            soup = BeautifulSoup(response.text, "html.parser")
+            links = soup.select("a[href^='https://www.mom.gov.sg']")
 
-            mom_links = [a.get("href") for a in soup.select(".result__title a") if "mom.gov.sg" in a.get("href", "")]
-            titles = [a.get_text(strip=True) for a in soup.select(".result__title a")]
+            if links:
+                first_link = links[0]["href"]
+                page = requests.get(first_link, headers=headers)
+                page_soup = BeautifulSoup(page.text, "html.parser")
+                paragraphs = page_soup.find_all("p")
+                page_text = "\n".join(p.get_text(strip=True) for p in paragraphs[:10])  # limit to 10 paras
 
-            logger.info(f"MOM links found: {mom_links}")
+                # Re-run LLM on fetched content
+                new_prompt = qa_prompt.format(context=page_text, question=state["input"], role=state["role"])
+                result = llm.invoke(new_prompt).content
 
-            if mom_links:
-                raw_url = mom_links[0]
-                parsed_url = urlparse(raw_url)
-                query_params = parse_qs(parsed_url.query)
-                uddg_url = query_params.get("uddg", [""])[0]
-                top_url = unquote(uddg_url)
-
-                top_title = titles[0] if titles else top_url
-                trace.append(("🌐 MOM Website", f"Found link: {top_url}"))
-
-                # === Fetch content from MOM page ===
-                page_resp = requests.get(top_url, headers=headers, timeout=10)
-                page_soup = BeautifulSoup(page_resp.text, "html.parser")
-                paragraphs = page_soup.find_all(["p", "li"])
-                raw_text = "\n".join(p.get_text(strip=True) for p in paragraphs if len(p.get_text(strip=True)) > 50)
-
-                context = raw_text[:3000]  # truncate to avoid token overflow
-
-                # Rerun summarization with LLM
-                chain = (
-                    RunnablePassthrough.assign(
-                        context=lambda x: context,
-                        question=lambda x: state["input"],
-                        role=lambda x: state["role"]
-                    )
-                    | qa_prompt
-                    | llm
-                    | StrOutputParser()
-                )
-                result = chain.invoke(state)
-
-                trace.append(("📚 RAG Agent", "Used MOM webpage content for summarization"))
-
+                trace.append(("🌐 MOM Website", f"Reviewed page: [{first_link}]({first_link})"))
                 return {
-                    "rag_output": result + f"\n\n🔗 **Reference:** [{top_title}]({top_url})",
-                    "source": "mom_web",
-                    "reference": top_url,
+                    "rag_output": result,
+                    "source": "web_rag",
+                    "reference": first_link,
                     "trace": trace
                 }
 
@@ -223,22 +188,28 @@ def rag_generation(state):
                 trace.append(("🌐 MOM Website", "No relevant pages found."))
                 return {
                     "rag_output": "**I'm sorry, I couldn't find specific information on the MoM official website.**",
-                    "source": "mom_web",
-                    "reference": "none",
+                    "source": "web_rag",
+                    "reference": "No link",
                     "trace": trace
                 }
 
         except Exception as e:
-            trace.append(("🌐 MOM Website", f"Search failed: {str(e)}"))
+            trace.append(("🌐 MOM Website", f"Error occurred during web search: {str(e)}"))
             return {
-                "rag_output": "**I'm sorry, I couldn't access the MoM website at this time.**",
-                "source": "mom_web",
-                "reference": "error",
+                "rag_output": "**I'm sorry, I couldn't find specific information on the MoM official website.**",
+                "source": "web_rag",
+                "reference": "Error",
                 "trace": trace
             }
 
-
-
+    else:
+        trace.append(("📚 RAG Agent", "Used FAISS context to generate answer."))
+        return {
+            "rag_output": result,
+            "source": "rag",
+            "reference": "FAISS Vectorstore",
+            "trace": trace
+        }
 
 
 def call_llm_agent(state):
@@ -369,6 +340,7 @@ def get_langgraph_agent(logger):
     builder.add_edge("call_tool", "format_tool_output")
     builder.add_edge("format_tool_output", "generate_final_answer")
     return builder.compile()
+
 
 # === WRAPPER ===
 class LangGraphAgentWrapper:
